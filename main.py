@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from replit import db
 
 TOKEN = os.environ['DISCORD_BOT_TOKEN']
-REPORT_CHANNEL_ID = 123456789012345678  # 🔁 Replace this with your Discord channel ID
+REPORT_CHANNEL_ID = 946311467848855555  # 🔁 Replace this with your Discord channel ID
 
 intents = discord.Intents.default()
 intents.message_content = True
