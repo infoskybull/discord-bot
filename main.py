@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands, tasks
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -45,17 +45,17 @@ async def on_message(message):
         return
 
     data = load_db()
-    if data.get("tracked_channel") != message.channel.id:
-        return
+    tracked_channel_id = data.get("tracked_channel")
+    if tracked_channel_id == message.channel.id:
+        author_id = str(message.author.id)
+        day_key = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        msg_key = f"{day_key}_messages"
 
-    author_id = str(message.author.id)
-    day_key = datetime.utcnow().strftime('%Y-%m-%d')
-    msg_key = f"{day_key}_messages"
+        data[msg_key] = data.get(msg_key, {})
+        data[msg_key][author_id] = data[msg_key].get(author_id, 0) + 1
 
-    data[msg_key] = data.get(msg_key, {})
-    data[msg_key][author_id] = data[msg_key].get(author_id, 0) + 1
+        save_db(data)
 
-    save_db(data)
     await bot.process_commands(message)
 
 @bot.event
@@ -75,7 +75,7 @@ async def on_raw_reaction_add(payload):
         return
 
     author_id = str(message.author.id)
-    day_key = datetime.utcnow().strftime('%Y-%m-%d')
+    day_key = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     react_key = f"{day_key}_reactions"
 
     unique_reactors = set()
@@ -91,7 +91,7 @@ async def on_raw_reaction_add(payload):
 
 @bot.command()
 async def report(ctx):
-    today = datetime.utcnow()
+    today = datetime.now(timezone.utc)
     day_key = today.strftime('%Y-%m-%d')
     data = load_db()
 
@@ -113,7 +113,7 @@ async def report(ctx):
 
 @tasks.loop(hours=24)
 async def weekly_report():
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if now.weekday() != 5:  # Only run on Saturday UTC
         return
 
