@@ -1,146 +1,81 @@
 import discord
 from discord.ext import commands, tasks
-import os
-import json
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import os
 
+# Lấy token từ biến môi trường
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
+# Cấu hình intents cần thiết
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
 intents.messages = True
 intents.guilds = True
 
+# Khởi tạo bot
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-DB_PATH = Path("db.json")
+# Hàm định dạng báo cáo
+def format_report(user_stats):
+    if not user_stats:
+        return "No messages or reactions found in the given time range."
 
-def load_db():
-    if DB_PATH.exists():
-        with open(DB_PATH, "r") as f:
-            return json.load(f)
-    return {}
+    sorted_stats = sorted(user_stats.items(), key=lambda item: item[1]['reactions'], reverse=True)
+    lines = ["**📊 Weekly Reaction Leaderboard:**\n"]
 
-def save_db(data):
-    with open(DB_PATH, "w") as f:
-        json.dump(data, f)
+    for i, (user, data) in enumerate(sorted_stats, 1):
+        lines.append(f"**{i}.** {user} — 💬 Messages: {data['messages']} | ⭐ Reactions: {data['reactions']}")
+
+    return "\n".join(lines)
+
+# Hàm thu thập dữ liệu từ kênh
+async def fetch_channel_messages(channel, days=7):
+    after = datetime.now(timezone.utc) - timedelta(days=days)
+    user_stats = defaultdict(lambda: {"messages": 0, "reactions": 0})
+    
+    async for message in channel.history(limit=None, after=after):
+        if not message.author.bot:
+            user_stats[message.author]["messages"] += 1
+
+            for reaction in message.reactions:
+                try:
+                    users = await reaction.users().flatten()
+                    for user in users:
+                        if user != message.author:
+                            user_stats[message.author]["reactions"] += 1
+                except Exception:
+                    continue
+    return user_stats
+
+# Lệnh thủ công để theo dõi
+@bot.command(name="track")
+async def track(ctx, channel: discord.TextChannel, days: int = 7):
+    await ctx.send(f"🔍 Tracking messages and reactions from **{channel.mention}** in the last **{days} days**...")
+    user_stats = await fetch_channel_messages(channel, days)
+    report = format_report(user_stats)
+    await ctx.send(report)
+
+# Tự động gửi báo cáo mỗi thứ 7
+@tasks.loop(hours=24)
+async def weekly_report():
+    now = datetime.now()
+    if now.weekday() == 5:  # 5 = Thứ 7
+        for guild in bot.guilds:
+            for channel in guild.text_channels:
+                if "general" in channel.name.lower():  # Tuỳ chỉnh nếu cần
+                    try:
+                        user_stats = await fetch_channel_messages(channel, 7)
+                        report = format_report(user_stats)
+                        await channel.send(report)
+                    except:
+                        continue
 
 @bot.event
 async def on_ready():
     print(f"✅ Bot is logged in as: {bot.user}")
     weekly_report.start()
 
-@bot.command()
-async def track(ctx, channel: discord.TextChannel):
-    data = load_db()
-    data["tracked_channel"] = channel.id
-    save_db(data)
-    await ctx.send(f"🔍 Now tracking reactions and messages in {channel.mention}")
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    data = load_db()
-    tracked_channel_id = data.get("tracked_channel")
-    if tracked_channel_id == message.channel.id:
-        author_id = str(message.author.id)
-        day_key = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-        msg_key = f"{day_key}_messages"
-
-        data[msg_key] = data.get(msg_key, {})
-        data[msg_key][author_id] = data[msg_key].get(author_id, 0) + 1
-
-        save_db(data)
-
-    await bot.process_commands(message)
-
-@bot.event
-async def on_raw_reaction_add(payload):
-    data = load_db()
-
-    if data.get("tracked_channel") != payload.channel_id:
-        return
-
-    channel = bot.get_channel(payload.channel_id)
-    if not channel:
-        channel = await bot.fetch_channel(payload.channel_id)
-
-    try:
-        message = await channel.fetch_message(payload.message_id)
-    except discord.NotFound:
-        return
-
-    author_id = str(message.author.id)
-    day_key = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    react_key = f"{day_key}_reactions"
-
-    unique_reactors = set()
-    for reaction in message.reactions:
-        async for user in reaction.users():
-            if not user.bot:
-                unique_reactors.add((reaction.emoji, user.id))
-
-    data[react_key] = data.get(react_key, {})
-    data[react_key][author_id] = data[react_key].get(author_id, 0) + len(unique_reactors)
-
-    save_db(data)
-
-@bot.command()
-async def report(ctx):
-    today = datetime.now(timezone.utc)
-    day_key = today.strftime('%Y-%m-%d')
-    data = load_db()
-
-    msg_counts = data.get(f"{day_key}_messages", {})
-    react_counts = data.get(f"{day_key}_reactions", {})
-
-    if not msg_counts and not react_counts:
-        await ctx.send("No data collected today.")
-        return
-
-    report_lines = [f"📊 Reaction Report for {day_key}"]
-    user_ids = set(msg_counts.keys()) | set(react_counts.keys())
-    for uid in user_ids:
-        msg = msg_counts.get(uid, 0)
-        react = react_counts.get(uid, 0)
-        report_lines.append(f"<@{uid}> – 📝 {msg} messages, 💖 {react} reactions")
-
-    await ctx.send("\n".join(report_lines))
-
-@tasks.loop(hours=24)
-async def weekly_report():
-    now = datetime.now(timezone.utc)
-    if now.weekday() != 5:  # Only run on Saturday UTC
-        return
-
-    data = load_db()
-    all_msg, all_react = {}, {}
-
-    for i in range(7):
-        day = (now - timedelta(days=i)).strftime('%Y-%m-%d')
-        for uid, count in data.get(f"{day}_messages", {}).items():
-            all_msg[uid] = all_msg.get(uid, 0) + count
-        for uid, count in data.get(f"{day}_reactions", {}).items():
-            all_react[uid] = all_react.get(uid, 0) + count
-
-    if not all_msg and not all_react:
-        return
-
-    report_lines = ["📊 Weekly Reaction Report"]
-    user_ids = set(all_msg.keys()) | set(all_react.keys())
-    for uid in user_ids:
-        msg = all_msg.get(uid, 0)
-        react = all_react.get(uid, 0)
-        report_lines.append(f"<@{uid}> – 📝 {msg} messages, 💖 {react} reactions")
-
-    channel_id = 946311467848855555  # fixed tracked channel
-    channel = bot.get_channel(channel_id)
-    if not channel:
-        channel = await bot.fetch_channel(channel_id)
-    await channel.send("\n".join(report_lines))
-
+# Khởi động bot
 bot.run(TOKEN)
