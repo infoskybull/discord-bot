@@ -7,7 +7,7 @@ import os
 # Lấy token từ biến môi trường
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-# Cấu hình intents cần thiết
+# Cấu hình intents
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
@@ -30,11 +30,11 @@ def format_report(user_stats):
 
     return "\n".join(lines)
 
-# Hàm thu thập dữ liệu từ kênh
+# Thu thập tin nhắn & reaction
 async def fetch_channel_messages(channel, days=7):
     after = datetime.now(timezone.utc) - timedelta(days=days)
     user_stats = defaultdict(lambda: {"messages": 0, "reactions": 0})
-    
+
     async for message in channel.history(limit=None, after=after):
         if not message.author.bot:
             user_stats[message.author]["messages"] += 1
@@ -47,9 +47,10 @@ async def fetch_channel_messages(channel, days=7):
                             user_stats[message.author]["reactions"] += 1
                 except Exception:
                     continue
+
     return user_stats
 
-# Lệnh thủ công để theo dõi
+# Lệnh !track để kiểm tra kênh bất kỳ
 @bot.command(name="track")
 async def track(ctx, channel: discord.TextChannel, days: int = 7):
     await ctx.send(f"🔍 Tracking messages and reactions from **{channel.mention}** in the last **{days} days**...")
@@ -57,19 +58,28 @@ async def track(ctx, channel: discord.TextChannel, days: int = 7):
     report = format_report(user_stats)
     await ctx.send(report)
 
-# Tự động gửi báo cáo mỗi thứ 7
+# Lệnh !report kiểm tra tại kênh đang chat
+@bot.command(name="report")
+async def manual_report(ctx, days: int = 7):
+    channel = ctx.channel
+    await ctx.send(f"📅 Generating reaction report for **#{channel.name}** in the last {days} days...")
+    user_stats = await fetch_channel_messages(channel, days)
+    report = format_report(user_stats)
+    await ctx.send(report)
+
+# Tự động gửi báo cáo thứ 7 (bạn có thể tùy chỉnh thêm)
 @tasks.loop(hours=24)
 async def weekly_report():
-    now = datetime.now()
-    if now.weekday() == 5:  # 5 = Thứ 7
+    now = datetime.now(timezone.utc)
+    if now.weekday() == 5:  # Saturday
         for guild in bot.guilds:
             for channel in guild.text_channels:
-                if "general" in channel.name.lower():  # Tuỳ chỉnh nếu cần
+                if "general" in channel.name.lower():
                     try:
                         user_stats = await fetch_channel_messages(channel, 7)
                         report = format_report(user_stats)
                         await channel.send(report)
-                    except:
+                    except Exception:
                         continue
 
 @bot.event
@@ -77,5 +87,5 @@ async def on_ready():
     print(f"✅ Bot is logged in as: {bot.user}")
     weekly_report.start()
 
-# Khởi động bot
+# Chạy bot
 bot.run(TOKEN)
