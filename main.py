@@ -8,6 +8,8 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+GUILD_ID = 946311467362287636  # Guild cố định của bạn
+
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
 INTENTS.messages = True
@@ -16,15 +18,18 @@ INTENTS.guilds = True
 INTENTS.members = True
 
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
-report_channels = {}  # Guild ID -> channel to send weekly reports
+report_channels = {}  # Lưu channel để gửi báo cáo tự động
 
 
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    for guild in bot.guilds:
+    try:
+        guild = discord.Object(id=GUILD_ID)
         await bot.tree.sync(guild=guild)
-        print(f"✅ Slash commands synced for {guild.name}")
+        print(f"✅ Slash commands synced for guild ID: {GUILD_ID}")
+    except Exception as e:
+        print(f"❌ Sync failed: {e}")
     weekly_report_loop.start()
 
 
@@ -93,7 +98,7 @@ async def generate_report(channel, days: int = 7):
     await channel.send(file=discord.File(image, filename="weekly_leaderboard.png"))
 
 
-@bot.tree.command(name="report", description="Generate a leaderboard report")
+@bot.tree.command(name="report", description="Generate a leaderboard report", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(days="Number of days to include in the report (1–7)")
 async def report_command(interaction: discord.Interaction, days: int = 7):
     await interaction.response.defer()
@@ -102,15 +107,14 @@ async def report_command(interaction: discord.Interaction, days: int = 7):
         await interaction.followup.send("Please choose between 1 and 7 days.")
         return
 
-    # Save current channel for scheduled reports
     report_channels[interaction.guild.id] = interaction.channel
     await generate_report(interaction.channel, days)
 
 
 @tasks.loop(minutes=1)
 async def weekly_report_loop():
-    now = datetime.now(timezone(timedelta(hours=7)))  # UTC+7
-    if now.weekday() == 5 and now.hour == 10 and now.minute == 0:  # Saturday 10:00
+    now = datetime.now(timezone(timedelta(hours=7)))  # GMT+7
+    if now.weekday() == 5 and now.hour == 10 and now.minute == 0:
         print("📤 Sending scheduled weekly reports...")
         for guild_id, channel in report_channels.items():
             try:
