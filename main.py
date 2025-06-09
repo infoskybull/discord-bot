@@ -1,100 +1,94 @@
 import discord
 from discord.ext import tasks
 from discord import app_commands
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
 import os
-import asyncio
+from datetime import datetime, timedelta, timezone
+from collections import defaultdict, Counter
 
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
+GUILD_ID = 946311467362287636  # Thay bằng ID server của bạn
+
 intents = discord.Intents.default()
-intents.messages = True
-intents.reactions = True
-intents.guilds = True
 intents.message_content = True
+intents.reactions = True
+intents.messages = True
+intents.guilds = True
 intents.members = True
-
-report_channels = {}  # guild_id -> channel_id
 
 class MyClient(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
+        self.report_channel_id = None
 
     async def setup_hook(self):
-        self.tree.add_command(report_command)
-        await self.tree.sync()
-        print("✅ Slash commands synced")
+        if not any(cmd.name == "report" for cmd in self.tree.get_commands()):
+            self.tree.add_command(report_command)
+        await self.tree.sync(guild=discord.Object(id=GUILD_ID))
+        print("✅ Slash commands synced for SKYBULL VIETNAM")
 
-bot = MyClient()
+client = MyClient()
 
-async def collect_stats(channel: discord.TextChannel, days: int = 7):
-    after = datetime.now(timezone.utc) - timedelta(days=days)
-    stats = defaultdict(lambda: {'messages': 0, 'reactions': 0})
+def get_report_content(messages_data, total_days):
+    lines = [f"📊 Report for the last {total_days} day(s):"]
+    sorted_users = sorted(messages_data.items(), key=lambda x: x[1]['reactions'], reverse=True)
 
-    async for msg in channel.history(limit=None, after=after):
+    for i, (user, data) in enumerate(sorted_users, 1):
+        lines.append(f"{i}. {user.display_name} — 📨 {data['messages']} msgs | ❤️ {data['reactions']} reacts")
+
+    top3 = sorted_users[:3]
+    if top3:
+        lines.append("\n🏆 Top 3:")
+        for i, (user, data) in enumerate(top3, 1):
+            lines.append(f"#{i}: {user.display_name} — ❤️ {data['reactions']} reactions")
+    return "\n".join(lines)
+
+async def collect_data(channel, days):
+    now = datetime.now(timezone.utc)
+    after_time = now - timedelta(days=days)
+    messages_data = defaultdict(lambda: {"messages": 0, "reactions": 0})
+
+    async for msg in channel.history(after=after_time, limit=None):
         if msg.author.bot:
             continue
-        stats[msg.author.display_name]['messages'] += 1
-        unique_reactors = set()
-        for reaction in msg.reactions:
-            async for user in reaction.users():
-                if user != msg.author:
-                    unique_reactors.add((reaction.emoji, user.id))
-        stats[msg.author.display_name]['reactions'] += len(unique_reactors)
+        messages_data[msg.author]["messages"] += 1
+        if msg.reactions:
+            for react in msg.reactions:
+                try:
+                    users = await react.users().flatten()
+                    messages_data[msg.author]["reactions"] += len(users)
+                except:
+                    continue
+    return messages_data
 
-    sorted_stats = sorted(stats.items(), key=lambda x: x[1]['reactions'], reverse=True)
-    return sorted_stats
-
-@bot.tree.command(name="report", description="Generate reaction leaderboard (1–7 days)")
-@app_commands.describe(days="Number of days to analyze (1–7)")
+@client.tree.command(name="report", description="Generate a report for the last N days")
+@app_commands.describe(days="Number of days (1-7)")
 async def report_command(interaction: discord.Interaction, days: int = 7):
-    if not (1 <= days <= 7):
-        await interaction.response.send_message("Please choose between 1 and 7 days.", ephemeral=True)
+    if days < 1 or days > 7:
+        await interaction.response.send_message("❌ Days must be between 1 and 7.", ephemeral=True)
         return
 
-    report_channels[interaction.guild_id] = interaction.channel_id
-    await interaction.response.send_message(f"Tracking this channel and generating report for past {days} day(s)...", ephemeral=True)
-
+    await interaction.response.defer(thinking=True)
     channel = interaction.channel
-    stats = await collect_stats(channel, days)
+    data = await collect_data(channel, days)
+    content = get_report_content(data, days)
+    await interaction.followup.send(content)
 
-    if not stats:
-        await channel.send("No data to display.")
-        return
-
-    lines = [f"📊 **Leaderboard for past {days} day(s):**"]
-    for i, (name, data) in enumerate(stats[:10], 1):
-        lines.append(f"{i}. **{name}** — 💬 {data['messages']} msgs, 💖 {data['reactions']} reactions")
-
-    await channel.send("\n".join(lines))
-
+# Tự động gửi report mỗi thứ 7 lúc 10h sáng GMT+7
 @tasks.loop(minutes=1)
-async def scheduled_report():
-    now = datetime.now(timezone(timedelta(hours=7)))  # GMT+7
-    if now.weekday() == 5 and now.hour == 10 and now.minute == 0:
-        for guild_id, channel_id in report_channels.items():
-            guild = bot.get_guild(guild_id)
-            if not guild:
-                continue
-            channel = guild.get_channel(channel_id)
-            if not channel:
-                continue
+async def weekly_report_task():
+    now = datetime.now(timezone(timedelta(hours=7)))
+    if now.weekday() == 5 and now.hour == 10 and now.minute == 0:  # Saturday 10:00
+        channel = client.get_channel(client.report_channel_id)
+        if channel:
+            data = await collect_data(channel, 7)
+            content = get_report_content(data, 7)
+            await channel.send("📥 Weekly Auto Report:\n" + content)
 
-            stats = await collect_stats(channel, 7)
-            if not stats:
-                await channel.send("📊 No data collected this week.")
-                continue
-
-            lines = ["📊 **Weekly Leaderboard (7 days):**"]
-            for i, (name, data) in enumerate(stats[:10], 1):
-                lines.append(f"{i}. **{name}** — 💬 {data['messages']} msgs, 💖 {data['reactions']} reactions")
-
-            await channel.send("\n".join(lines))
-
-@bot.event
+@client.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    scheduled_report.start()
+    print(f"✅ Logged in as {client.user}")
+    client.report_channel_id = YOUR_TRACKED_CHANNEL_ID  # <-- Thay bằng ID channel thực tế
+    weekly_report_task.start()
 
-bot.run(TOKEN)
+client.run(TOKEN)
