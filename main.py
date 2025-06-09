@@ -3,68 +3,63 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timedelta
+from collections import defaultdict
+
+TOKEN = os.getenv("DISCORD_TOKEN")
 
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
 intents.reactions = True
 intents.guilds = True
+intents.members = True
 
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
+        self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        self.tree.copy_global_to(guild=None)
-        await self.tree.sync()
+        await self.tree.sync()  # Đồng bộ lệnh toàn cục
 
 bot = MyBot()
 
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"✅ Logged in as {bot.user}")
 
-@bot.tree.command(name="report")
-@app_commands.describe(days="Số ngày cần báo cáo")
+@bot.tree.command(name="report", description="Tổng hợp số reaction mỗi người trong X ngày gần nhất")
+@app_commands.describe(days="Số ngày cần thống kê (tính từ hiện tại)")
 async def report(interaction: discord.Interaction, days: int):
     await interaction.response.defer(thinking=True)
 
-    now = datetime.utcnow()
-    since = now - timedelta(days=days)
+    channel = interaction.channel
+    after_time = datetime.utcnow() - timedelta(days=days)
 
-    user_stats = {}  # {user_id: {"name": str, "messages": int, "reactions": int}}
+    user_data = defaultdict(lambda: {"messages": 0, "reactions": 0})
 
-    for channel in interaction.guild.text_channels:
-        try:
-            async for msg in channel.history(after=since, oldest_first=True, limit=None):
-                if msg.author.bot:
-                    continue
-
-                user_id = msg.author.id
-                if user_id not in user_stats:
-                    user_stats[user_id] = {
-                        "name": msg.author.display_name,
-                        "messages": 0,
-                        "reactions": 0
-                    }
-                user_stats[user_id]["messages"] += 1
-                user_stats[user_id]["reactions"] += sum(reaction.count for reaction in msg.reactions)
-        except (discord.Forbidden, discord.HTTPException):
+    async for message in channel.history(after=after_time, limit=None):
+        if message.author.bot:
             continue
 
-    if not user_stats:
-        await interaction.followup.send("😿 Không có dữ liệu để thống kê.")
+        user_data[message.author]["messages"] += 1
+        for reaction in message.reactions:
+            try:
+                count = reaction.count
+                user_data[message.author]["reactions"] += count
+            except:
+                pass
+
+    if not user_data:
+        await interaction.followup.send("Không có dữ liệu nào trong khoảng thời gian đã chọn.")
         return
 
-    sorted_users = sorted(user_stats.values(), key=lambda x: x["reactions"], reverse=True)
+    sorted_data = sorted(user_data.items(), key=lambda x: x[1]["reactions"], reverse=True)
 
-    lines = ["📊 **Báo cáo tương tác**"]
-    for i, user in enumerate(sorted_users, 1):
-        lines.append(f"{i}. **{user['name']}** — 💬 {user['messages']} tin nhắn | 🧡 {user['reactions']} reaction")
+    report_lines = []
+    for i, (user, data) in enumerate(sorted_data, start=1):
+        report_lines.append(f"{i}. {user.display_name}: {data['messages']} msg, {data['reactions']} react")
 
-    await interaction.followup.send("\n".join(lines))
-
-TOKEN = os.getenv("DISCORD_TOKEN")
-assert TOKEN is not None and TOKEN != "", "❌ DISCORD_TOKEN is not set!"
+    report_text = "**📊 BÁO CÁO REACTION:**\n\n" + "\n".join(report_lines)
+    await interaction.followup.send(report_text)
 
 bot.run(TOKEN)
