@@ -2,13 +2,9 @@ import os
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from dotenv import load_dotenv
 import datetime
 
-# Load biến môi trường từ file .env (nếu chạy local)
-load_dotenv()
-
-# Lấy thông tin từ biến môi trường
+# Lấy thông tin từ biến môi trường Railway
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
 CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
@@ -38,8 +34,7 @@ class MyBot(commands.Bot):
     async def auto_report(self):
         channel = self.get_channel(CHANNEL_ID)
         if channel:
-            # Thay dòng dưới bằng nội dung bạn muốn gửi
-            await channel.send("📊 Báo cáo hàng ngày: Hôm nay bot vẫn hoạt động ngon lành!")
+            await channel.send("📊 Báo cáo hàng tuần: Mọi thứ vẫn hoạt động tốt!")
         else:
             print("❌ Không tìm thấy channel!")
 
