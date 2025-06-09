@@ -1,132 +1,100 @@
-import os
 import discord
+from discord.ext import tasks
 from discord import app_commands
-from discord.ext import commands, tasks
-from datetime import datetime, timedelta, timezone
 from collections import defaultdict
-from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont
+from datetime import datetime, timedelta, timezone
+import os
+import asyncio
 
-TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
-GUILD_ID = 946311467362287636  # Guild cố định của bạn
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+intents = discord.Intents.default()
+intents.messages = True
+intents.reactions = True
+intents.guilds = True
+intents.message_content = True
+intents.members = True
 
-INTENTS = discord.Intents.default()
-INTENTS.message_content = True
-INTENTS.messages = True
-INTENTS.reactions = True
-INTENTS.guilds = True
-INTENTS.members = True
+report_channels = {}  # guild_id -> channel_id
 
-bot = commands.Bot(command_prefix="!", intents=INTENTS)
-report_channels = {}  # Lưu channel để gửi báo cáo tự động
+class MyClient(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
 
+    async def setup_hook(self):
+        self.tree.add_command(report_command)
+        await self.tree.sync()
+        print("✅ Slash commands synced")
+
+bot = MyClient()
+
+async def collect_stats(channel: discord.TextChannel, days: int = 7):
+    after = datetime.now(timezone.utc) - timedelta(days=days)
+    stats = defaultdict(lambda: {'messages': 0, 'reactions': 0})
+
+    async for msg in channel.history(limit=None, after=after):
+        if msg.author.bot:
+            continue
+        stats[msg.author.display_name]['messages'] += 1
+        unique_reactors = set()
+        for reaction in msg.reactions:
+            async for user in reaction.users():
+                if user != msg.author:
+                    unique_reactors.add((reaction.emoji, user.id))
+        stats[msg.author.display_name]['reactions'] += len(unique_reactors)
+
+    sorted_stats = sorted(stats.items(), key=lambda x: x[1]['reactions'], reverse=True)
+    return sorted_stats
+
+@bot.tree.command(name="report", description="Generate reaction leaderboard (1–7 days)")
+@app_commands.describe(days="Number of days to analyze (1–7)")
+async def report_command(interaction: discord.Interaction, days: int = 7):
+    if not (1 <= days <= 7):
+        await interaction.response.send_message("Please choose between 1 and 7 days.", ephemeral=True)
+        return
+
+    report_channels[interaction.guild_id] = interaction.channel_id
+    await interaction.response.send_message(f"Tracking this channel and generating report for past {days} day(s)...", ephemeral=True)
+
+    channel = interaction.channel
+    stats = await collect_stats(channel, days)
+
+    if not stats:
+        await channel.send("No data to display.")
+        return
+
+    lines = [f"📊 **Leaderboard for past {days} day(s):**"]
+    for i, (name, data) in enumerate(stats[:10], 1):
+        lines.append(f"{i}. **{name}** — 💬 {data['messages']} msgs, 💖 {data['reactions']} reactions")
+
+    await channel.send("\n".join(lines))
+
+@tasks.loop(minutes=1)
+async def scheduled_report():
+    now = datetime.now(timezone(timedelta(hours=7)))  # GMT+7
+    if now.weekday() == 5 and now.hour == 10 and now.minute == 0:
+        for guild_id, channel_id in report_channels.items():
+            guild = bot.get_guild(guild_id)
+            if not guild:
+                continue
+            channel = guild.get_channel(channel_id)
+            if not channel:
+                continue
+
+            stats = await collect_stats(channel, 7)
+            if not stats:
+                await channel.send("📊 No data collected this week.")
+                continue
+
+            lines = ["📊 **Weekly Leaderboard (7 days):**"]
+            for i, (name, data) in enumerate(stats[:10], 1):
+                lines.append(f"{i}. **{name}** — 💬 {data['messages']} msgs, 💖 {data['reactions']} reactions")
+
+            await channel.send("\n".join(lines))
 
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    try:
-        guild = discord.Object(id=GUILD_ID)
-        await bot.tree.sync(guild=guild)
-        print(f"✅ Slash commands synced for guild ID: {GUILD_ID}")
-    except Exception as e:
-        print(f"❌ Sync failed: {e}")
-    weekly_report_loop.start()
+    scheduled_report.start()
 
-
-def generate_leaderboard_image(data, top_n=3):
-    width, row_height = 700, 50
-    display_data = data[:top_n]
-    height = max(200, row_height * (len(display_data) + 1) + 50)
-
-    img = Image.new("RGB", (width, height), color=(30, 30, 30))
-    draw = ImageDraw.Draw(img)
-
-    try:
-        font = ImageFont.truetype("arial.ttf", 20)
-    except:
-        font = ImageFont.load_default()
-
-    draw.text((20, 20), f"🏆 Top {top_n} Leaderboard", fill=(255, 255, 255), font=font)
-
-    for i, (name, stats) in enumerate(display_data, start=1):
-        line = f"{i}. {name} - Messages: {stats['messages']}, Reactions: {stats['reactions']}"
-        draw.text((20, 20 + i * row_height), line, fill=(200, 200, 200), font=font)
-
-    buffer = BytesIO()
-    img.save(buffer, format="PNG")
-    buffer.seek(0)
-    return buffer
-
-
-async def generate_report(channel, days: int = 7):
-    now = datetime.now(timezone.utc)
-    since = now - timedelta(days=days)
-
-    user_messages = defaultdict(lambda: {"messages": 0, "reactions": 0})
-
-    async for message in channel.history(after=since, oldest_first=True, limit=None):
-        if message.author.bot:
-            continue
-
-        user = message.author.display_name
-        user_messages[user]["messages"] += 1
-
-        unique_reactors = set()
-        for reaction in message.reactions:
-            try:
-                users = await reaction.users().flatten()
-                for u in users:
-                    if u != message.author:
-                        unique_reactors.add((reaction.emoji, u.id))
-            except:
-                pass
-        user_messages[user]["reactions"] += len(unique_reactors)
-
-    sorted_data = sorted(user_messages.items(), key=lambda x: (x[1]["reactions"], x[1]["messages"]), reverse=True)
-
-    if not sorted_data:
-        await channel.send("No data found for this period.")
-        return
-
-    # Summary
-    total_msg = sum(entry["messages"] for _, entry in sorted_data)
-    total_react = sum(entry["reactions"] for _, entry in sorted_data)
-    await channel.send(f"📊 Weekly Report (Last {days} Days)\nTotal Messages: {total_msg}\nTotal Reactions: {total_react}")
-
-    # Top 3 image
-    image = generate_leaderboard_image(sorted_data, top_n=3)
-    await channel.send(file=discord.File(image, filename="weekly_leaderboard.png"))
-
-
-@bot.tree.command(name="report", description="Generate a leaderboard report", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(days="Number of days to include in the report (1–7)")
-async def report_command(interaction: discord.Interaction, days: int = 7):
-    await interaction.response.defer()
-
-    if days < 1 or days > 7:
-        await interaction.followup.send("Please choose between 1 and 7 days.")
-        return
-
-    report_channels[interaction.guild.id] = interaction.channel
-    await generate_report(interaction.channel, days)
-
-
-@tasks.loop(minutes=1)
-async def weekly_report_loop():
-    now = datetime.now(timezone(timedelta(hours=7)))  # GMT+7
-    if now.weekday() == 5 and now.hour == 10 and now.minute == 0:
-        print("📤 Sending scheduled weekly reports...")
-        for guild_id, channel in report_channels.items():
-            try:
-                await generate_report(channel)
-            except Exception as e:
-                print(f"❌ Failed to send report to guild {guild_id}:", e)
-
-
-@weekly_report_loop.before_loop
-async def before_weekly_report():
-    await bot.wait_until_ready()
-
-
-if __name__ == "__main__":
-    bot.run(TOKEN)
+bot.run(TOKEN)
