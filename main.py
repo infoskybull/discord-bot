@@ -1,46 +1,61 @@
 import os
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
-import datetime
+from datetime import datetime, timedelta
+import asyncio
 
-# Lấy thông tin từ biến môi trường Railway
+intents = discord.Intents.default()
+intents.messages = True
+intents.reactions = True
+intents.message_content = True
+
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
-
-# Kiểm tra biến môi trường bắt buộc
-assert TOKEN, "❌ DISCORD_TOKEN is not set!"
-assert GUILD_ID, "❌ DISCORD_GUILD_ID is not set!"
-assert CHANNEL_ID, "❌ DISCORD_CHANNEL_ID is not set!"
+assert TOKEN is not None and TOKEN != "", "❌ DISCORD_TOKEN is not set!"
 
 class MyBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True
-        intents.reactions = True
-        intents.guilds = True
-
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix="/", intents=intents, application_id=None)
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        guild = discord.Object(id=GUILD_ID)
-        self.tree.copy_global_to(guild=guild)
-        await self.tree.sync(guild=guild)
-        self.auto_report.start()
-
-    @tasks.loop(time=datetime.time(hour=10, tzinfo=datetime.timezone(datetime.timedelta(hours=7))))
-    async def auto_report(self):
-        channel = self.get_channel(CHANNEL_ID)
-        if channel:
-            await channel.send("📊 Báo cáo hàng tuần: Mọi thứ vẫn hoạt động tốt!")
-        else:
-            print("❌ Không tìm thấy channel!")
-
-    @auto_report.before_loop
-    async def before_auto_report(self):
-        await self.wait_until_ready()
+        await self.tree.sync()
 
 bot = MyBot()
+
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user} ({bot.user.id})")
+
+@bot.tree.command(name="report", description="Tạo báo cáo reaction trong N ngày qua")
+@app_commands.describe(days="Số ngày cần báo cáo")
+async def report(interaction: discord.Interaction, days: int):
+    await interaction.response.defer(thinking=True)
+
+    now = datetime.utcnow()
+    since = now - timedelta(days=days)
+
+    channel = interaction.channel
+    assert isinstance(channel, discord.TextChannel)
+
+    messages = []
+    async for message in channel.history(limit=None, after=since):
+        total_reactions = sum(reaction.count for reaction in message.reactions)
+        if total_reactions > 0:
+            messages.append((message, total_reactions))
+
+    if not messages:
+        await interaction.followup.send("Không có tin nhắn nào có reaction trong khoảng thời gian đó.")
+        return
+
+    messages.sort(key=lambda x: x[1], reverse=True)
+    lines = []
+    for msg, total in messages:
+        content = msg.content[:50].replace('\n', ' ')
+        author = msg.author.display_name
+        lines.append(f"{author}: '{content}' → ❤️ {total}")
+
+    report_text = "\n".join(lines[:10])
+    await interaction.followup.send(f"📊 **Top phản ứng trong {days} ngày qua**:\n{report_text}")
+
 bot.run(TOKEN)
