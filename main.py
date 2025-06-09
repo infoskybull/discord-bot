@@ -1,94 +1,107 @@
-import discord
-from discord.ext import tasks
-from discord import app_commands
 import os
-from datetime import datetime, timedelta, timezone
-from collections import defaultdict, Counter
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
+from datetime import datetime, timedelta
+from collections import defaultdict
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = 946311467362287636  # Thay bằng ID server của bạn
+GUILD_ID = 946311467362287636  # Thay bằng guild ID thực tế
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
-intents.messages = True
 intents.guilds = True
 intents.members = True
 
-class MyClient(discord.Client):
+class MyBot(commands.Bot):
     def __init__(self):
-        super().__init__(intents=intents)
+        super().__init__(command_prefix="!", intents=intents)
         self.tree = app_commands.CommandTree(self)
-        self.report_channel_id = None
+        self.message_log = defaultdict(list)
+        self.reaction_log = defaultdict(lambda: defaultdict(int))
 
     async def setup_hook(self):
-        if not any(cmd.name == "report" for cmd in self.tree.get_commands()):
-            self.tree.add_command(report_command)
-        await self.tree.sync(guild=discord.Object(id=GUILD_ID))
-        print("✅ Slash commands synced for SKYBULL VIETNAM")
+        # Sync slash commands cho guild cụ thể (tránh delay toàn cầu)
+        guild = discord.Object(id=GUILD_ID)
+        self.tree.copy_global_to(guild=guild)
+        await self.tree.sync(guild=guild)
+        print("✅ Slash commands synced for guild.")
 
-client = MyClient()
+bot = MyBot()
 
-def get_report_content(messages_data, total_days):
-    lines = [f"📊 Report for the last {total_days} day(s):"]
-    sorted_users = sorted(messages_data.items(), key=lambda x: x[1]['reactions'], reverse=True)
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    weekly_report.start()
 
-    for i, (user, data) in enumerate(sorted_users, 1):
-        lines.append(f"{i}. {user.display_name} — 📨 {data['messages']} msgs | ❤️ {data['reactions']} reacts")
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    bot.message_log[message.author.id].append((message.channel.id, message.created_at))
 
-    top3 = sorted_users[:3]
-    if top3:
-        lines.append("\n🏆 Top 3:")
-        for i, (user, data) in enumerate(top3, 1):
-            lines.append(f"#{i}: {user.display_name} — ❤️ {data['reactions']} reactions")
-    return "\n".join(lines)
+@bot.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return
+    bot.reaction_log[user.id][reaction.message.id] += 1
 
-async def collect_data(channel, days):
-    now = datetime.now(timezone.utc)
-    after_time = now - timedelta(days=days)
-    messages_data = defaultdict(lambda: {"messages": 0, "reactions": 0})
-
-    async for msg in channel.history(after=after_time, limit=None):
-        if msg.author.bot:
-            continue
-        messages_data[msg.author]["messages"] += 1
-        if msg.reactions:
-            for react in msg.reactions:
-                try:
-                    users = await react.users().flatten()
-                    messages_data[msg.author]["reactions"] += len(users)
-                except:
-                    continue
-    return messages_data
-
-@client.tree.command(name="report", description="Generate a report for the last N days")
-@app_commands.describe(days="Number of days (1-7)")
+@bot.tree.command(name="report", description="Xem báo cáo top tương tác trong X ngày gần nhất (1-7)")
+@app_commands.describe(days="Số ngày gần nhất (1-7)")
 async def report_command(interaction: discord.Interaction, days: int = 7):
     if days < 1 or days > 7:
-        await interaction.response.send_message("❌ Days must be between 1 and 7.", ephemeral=True)
+        await interaction.response.send_message("❌ Vui lòng chọn số ngày từ 1 đến 7.", ephemeral=True)
         return
 
-    await interaction.response.defer(thinking=True)
-    channel = interaction.channel
-    data = await collect_data(channel, days)
-    content = get_report_content(data, days)
-    await interaction.followup.send(content)
+    await interaction.response.defer()
 
-# Tự động gửi report mỗi thứ 7 lúc 10h sáng GMT+7
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    message_count = defaultdict(int)
+    reaction_count = defaultdict(int)
+
+    for user_id, messages in bot.message_log.items():
+        for _, created_at in messages:
+            if created_at >= cutoff:
+                message_count[user_id] += 1
+
+    for user_id, reactions in bot.reaction_log.items():
+        for msg_id, count in reactions.items():
+            reaction_count[user_id] += count
+
+    all_user_ids = set(message_count) | set(reaction_count)
+    result_lines = ["📊 **Báo cáo tương tác 7 ngày gần nhất:**\n"]
+
+    leaderboard = []
+    for uid in all_user_ids:
+        msg = message_count.get(uid, 0)
+        react = reaction_count.get(uid, 0)
+        total = msg + react
+        leaderboard.append((uid, msg, react, total))
+
+    leaderboard.sort(key=lambda x: x[3], reverse=True)
+
+    for rank, (uid, msg, react, total) in enumerate(leaderboard, start=1):
+        user = await bot.fetch_user(uid)
+        result_lines.append(f"**#{rank}** {user.display_name} - 💬 `{msg}` | ❤️ `{react}` | ⭐ Tổng: `{total}`")
+
+    await interaction.followup.send("\n".join(result_lines[:10]))  # top 10
+
 @tasks.loop(minutes=1)
-async def weekly_report_task():
-    now = datetime.now(timezone(timedelta(hours=7)))
-    if now.weekday() == 5 and now.hour == 10 and now.minute == 0:  # Saturday 10:00
-        channel = client.get_channel(client.report_channel_id)
-        if channel:
-            data = await collect_data(channel, 7)
-            content = get_report_content(data, 7)
-            await channel.send("📥 Weekly Auto Report:\n" + content)
+async def weekly_report():
+    now = datetime.now()
+    if now.weekday() == 5 and now.hour == 10 and now.minute == 0:  # 10h sáng thứ 7 GMT+7
+        for guild in bot.guilds:
+            for channel in guild.text_channels:
+                try:
+                    perms = channel.permissions_for(guild.me)
+                    if perms.send_messages:
+                        class FakeInteraction:
+                            async def response(self): pass
+                            async def followup(self): pass
+                        await report_command.callback(FakeInteraction(), 7)
+                        break
+                except:
+                    continue
 
-@client.event
-async def on_ready():
-    print(f"✅ Logged in as {client.user}")
-    client.report_channel_id = YOUR_TRACKED_CHANNEL_ID  # <-- Thay bằng ID channel thực tế
-    weekly_report_task.start()
-
-client.run(TOKEN)
+bot.run(TOKEN)
