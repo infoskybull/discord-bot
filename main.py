@@ -2,50 +2,52 @@ import os
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from datetime import datetime, timedelta
-import pytz
+from dotenv import load_dotenv
+import datetime
 
+# Tải biến môi trường từ .env (nếu chạy local)
+load_dotenv()
+
+# Lấy token và các thông tin cấu hình từ biến môi trường
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "946311467362287636"))
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "YOUR_CHANNEL_ID"))  # Thay bằng ID thật
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))
+CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 
+# Kiểm tra biến môi trường
 assert TOKEN is not None and TOKEN != "", "❌ DISCORD_TOKEN is not set!"
-
-intents = discord.Intents.default()
-intents.message_content = True
-intents.reactions = True
-intents.guilds = True
+assert GUILD_ID is not None, "❌ DISCORD_GUILD_ID is not set!"
+assert CHANNEL_ID is not None, "❌ DISCORD_CHANNEL_ID is not set!"
 
 class MyBot(commands.Bot):
     def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = True
+        intents.reactions = True
+        intents.guilds = True
+
         super().__init__(command_prefix="!", intents=intents)
-        self.synced = False  # Để tránh sync nhiều lần
-        self.guild = discord.Object(id=GUILD_ID)
+        self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        self.tree.add_command(report_command)
+        guild = discord.Object(id=GUILD_ID)
+        self.tree.copy_global_to(guild=guild)
+        await self.tree.sync(guild=guild)
         self.auto_report.start()
 
-    @tasks.loop(hours=24)
+    @tasks.loop(time=datetime.time(hour=10, tzinfo=datetime.timezone(datetime.timedelta(hours=7))))
     async def auto_report(self):
+        from report import generate_report_image  # Import tại thời điểm chạy
+        channel = self.get_channel(CHANNEL_ID)
+        if channel:
+            image_path = generate_report_image()
+            await channel.send("📊 Bảng tổng hợp tương tác hôm nay:", file=discord.File(image_path))
+        else:
+            print("❌ Không tìm thấy channel!")
+
+    @auto_report.before_loop
+    async def before_auto_report(self):
         await self.wait_until_ready()
-        now = datetime.now(pytz.timezone("Asia/Ho_Chi_Minh"))
-        if now.hour == 10 and now.weekday() == 5:  # Thứ 7, 10h sáng
-            channel = self.get_channel(CHANNEL_ID)
-            if channel:
-                await channel.send("📊 Báo cáo tự động lúc 10h sáng thứ 7 (GMT+7) đã được gửi!")
 
-    async def on_ready(self):
-        if not self.synced:
-            await self.tree.sync(guild=self.guild)
-            self.synced = True
-        print(f"✅ Logged in as {self.user}")
-
+# Khởi chạy bot
 bot = MyBot()
-
-# Slash command /report
-@app_commands.command(name="report", description="📊 Gửi báo cáo thủ công")
-async def report_command(interaction: discord.Interaction):
-    await interaction.response.send_message("📈 Đây là báo cáo của bạn!", ephemeral=True)
-
 bot.run(TOKEN)
