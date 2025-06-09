@@ -1,12 +1,18 @@
 import os
 import discord
-from discord.ext import commands, tasks
+from discord.ext import tasks, commands
 from discord import app_commands
 from datetime import datetime, timedelta
-from collections import defaultdict
+import pytz
+import asyncio
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = 946311467362287636
+
+# Check token existence
+assert TOKEN is not None and TOKEN != "", "❌ DISCORD_TOKEN is not set!"
+
+# Channel ID bạn muốn bot gửi báo cáo tự động
+TRACK_CHANNEL_ID = 946311467362287636
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -17,83 +23,81 @@ intents.members = True
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
-        self.message_log = defaultdict(list)
-        self.reaction_log = defaultdict(lambda: defaultdict(int))
+        self.synced = False
 
     async def setup_hook(self):
-        guild = discord.Object(id=GUILD_ID)
-        self.tree.copy_global_to(guild=guild)
-        await self.tree.sync(guild=guild)
-        print("✅ Slash commands synced.")
+        if not self.synced:
+            await self.tree.sync()
+            self.synced = True
+        self.auto_report.start()
 
 bot = MyBot()
 
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    weekly_report.start()
+    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
 
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    bot.message_log[message.author.id].append((message.channel.id, message.created_at))
-
-@bot.event
-async def on_reaction_add(reaction, user):
-    if user.bot:
-        return
-    bot.reaction_log[user.id][reaction.message.id] += 1
-
-@bot.tree.command(name="report", description="Xem báo cáo top tương tác trong X ngày gần nhất (1-7)")
-@app_commands.describe(days="Số ngày gần nhất (1-7)")
-async def report_command(interaction: discord.Interaction, days: int = 7):
-    if days < 1 or days > 7:
-        await interaction.response.send_message("❌ Vui lòng chọn số ngày từ 1 đến 7.", ephemeral=True)
+@bot.tree.command(name="report", description="Generate engagement report (last 1-7 days)")
+@app_commands.describe(days="Number of days to report (1-7)")
+async def report(interaction: discord.Interaction, days: int = 1):
+    if not (1 <= days <= 7):
+        await interaction.response.send_message("❌ Please choose days between 1 and 7.", ephemeral=True)
         return
 
     await interaction.response.defer()
+    await send_report(interaction.channel, days)
+    await interaction.followup.send("✅ Report generated!", ephemeral=True)
 
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    message_count = defaultdict(int)
-    reaction_count = defaultdict(int)
+async def send_report(channel, days):
+    now = datetime.now(pytz.utc)
+    since = now - timedelta(days=days)
 
-    for user_id, messages in bot.message_log.items():
-        for _, created_at in messages:
-            if created_at >= cutoff:
-                message_count[user_id] += 1
+    message_counts = {}
+    reaction_counts = {}
 
-    for user_id, reactions in bot.reaction_log.items():
-        for msg_id, count in reactions.items():
-            reaction_count[user_id] += count
+    async for message in channel.history(limit=None, after=since):
+        if message.author.bot:
+            continue
 
-    all_user_ids = set(message_count) | set(reaction_count)
-    result_lines = [f"📊 **Báo cáo tương tác {days} ngày gần nhất:**\n"]
+        user_id = message.author.id
+        message_counts[user_id] = message_counts.get(user_id, 0) + 1
 
-    leaderboard = []
-    for uid in all_user_ids:
-        msg = message_count.get(uid, 0)
-        react = reaction_count.get(uid, 0)
-        total = msg + react
-        leaderboard.append((uid, msg, react, total))
+        reactors = set()
+        for reaction in message.reactions:
+            async for user in reaction.users():
+                if user.id != message.author.id and not user.bot:
+                    reactors.add(user.id)
+        for user_id in reactors:
+            reaction_counts[user_id] = reaction_counts.get(user_id, 0) + 1
 
-    leaderboard.sort(key=lambda x: x[3], reverse=True)
+    users = set(message_counts.keys()) | set(reaction_counts.keys())
+    if not users:
+        await channel.send("📉 No activity during this period.")
+        return
 
-    for rank, (uid, msg, react, total) in enumerate(leaderboard, start=1):
-        user = await bot.fetch_user(uid)
-        result_lines.append(f"**#{rank}** {user.display_name} - 💬 `{msg}` | ❤️ `{react}` | ⭐ Tổng: `{total}`")
+    lines = ["📊 **Activity Report**"]
+    for user_id in users:
+        member = await channel.guild.fetch_member(user_id)
+        name = member.display_name
+        msg = message_counts.get(user_id, 0)
+        react = reaction_counts.get(user_id, 0)
+        lines.append(f"• **{name}** — {msg} msg, {react} reacts")
 
-    await interaction.followup.send("\n".join(result_lines[:10]))
+    top3 = sorted(users, key=lambda uid: (message_counts.get(uid, 0) + reaction_counts.get(uid, 0)), reverse=True)[:3]
+    top_lines = ["🏆 **Top 3**"]
+    for i, uid in enumerate(top3, 1):
+        member = await channel.guild.fetch_member(uid)
+        score = message_counts.get(uid, 0) + reaction_counts.get(uid, 0)
+        top_lines.append(f"{i}. **{member.display_name}** - {score} pts")
+
+    await channel.send("\n".join(lines + ["\n"] + top_lines))
 
 @tasks.loop(minutes=1)
-async def weekly_report():
-    now = datetime.now()
+async def auto_report():
+    now = datetime.now(pytz.timezone("Asia/Bangkok"))
     if now.weekday() == 5 and now.hour == 10 and now.minute == 0:
-        for guild in bot.guilds:
-            for channel in guild.text_channels:
-                if channel.permissions_for(guild.me).send_messages:
-                    fake = type('FakeInteraction', (), {"response": None, "followup": channel.send})
-                    await report_command.callback(fake(), 7)
-                    break
+        channel = bot.get_channel(TRACK_CHANNEL_ID)
+        if channel:
+            await send_report(channel, 7)
 
 bot.run(TOKEN)
