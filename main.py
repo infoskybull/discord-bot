@@ -16,10 +16,9 @@ intents.members = True
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
-        self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        await self.tree.sync()  # Đồng bộ lệnh toàn cục
+        await self.tree.sync()
 
 bot = MyBot()
 
@@ -28,7 +27,7 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user}")
 
 @bot.tree.command(name="report", description="Tổng hợp số reaction mỗi người trong X ngày gần nhất")
-@app_commands.describe(days="Số ngày cần thống kê (tính từ hiện tại)")
+@app_commands.describe(days="Số ngày cần thống kê")
 async def report(interaction: discord.Interaction, days: int):
     await interaction.response.defer(thinking=True)
 
@@ -43,11 +42,7 @@ async def report(interaction: discord.Interaction, days: int):
 
         user_data[message.author]["messages"] += 1
         for reaction in message.reactions:
-            try:
-                count = reaction.count
-                user_data[message.author]["reactions"] += count
-            except:
-                pass
+            user_data[message.author]["reactions"] += reaction.count
 
     if not user_data:
         await interaction.followup.send("Không có dữ liệu nào trong khoảng thời gian đã chọn.")
