@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import os
 
-TOKEN = os.getenv("DISCORD_TOKEN")  # Hoặc gán trực tiếp: TOKEN = "your-token"
+TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = 946311467362287636  # Thay bằng server ID của bạn
 
 intents = discord.Intents.default()
@@ -19,14 +19,13 @@ class MyBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        guild = discord.Object(id=GUILD_ID)
-        self.tree.add_command(report)
-        await self.tree.sync(guild=guild)
-        print("✅ Slash command synced.")
+        await self.tree.sync(guild=discord.Object(id=GUILD_ID))
+        print("✅ Slash commands synced.")
 
 bot = MyBot()
 
-@bot.tree.command(name="report", description="📊 Xếp hạng người được nhiều reaction nhất (7 ngày qua)")
+# ✅ Không cần dùng self.tree.add_command nữa, dùng @bot.tree.command thay thế
+@bot.tree.command(name="report", description="📊 Xếp hạng người nhận nhiều reaction nhất (7 ngày qua)")
 async def report(interaction: discord.Interaction):
     await interaction.response.defer()
     channel = interaction.channel
