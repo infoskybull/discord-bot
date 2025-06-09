@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = 946311467362287636  # Thay bằng guild ID thực tế
+GUILD_ID = 946311467362287636
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -17,16 +17,14 @@ intents.members = True
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
-        self.tree = app_commands.CommandTree(self)
         self.message_log = defaultdict(list)
         self.reaction_log = defaultdict(lambda: defaultdict(int))
 
     async def setup_hook(self):
-        # Sync slash commands cho guild cụ thể (tránh delay toàn cầu)
         guild = discord.Object(id=GUILD_ID)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
-        print("✅ Slash commands synced for guild.")
+        print("✅ Slash commands synced.")
 
 bot = MyBot()
 
@@ -70,7 +68,7 @@ async def report_command(interaction: discord.Interaction, days: int = 7):
             reaction_count[user_id] += count
 
     all_user_ids = set(message_count) | set(reaction_count)
-    result_lines = ["📊 **Báo cáo tương tác 7 ngày gần nhất:**\n"]
+    result_lines = [f"📊 **Báo cáo tương tác {days} ngày gần nhất:**\n"]
 
     leaderboard = []
     for uid in all_user_ids:
@@ -85,23 +83,17 @@ async def report_command(interaction: discord.Interaction, days: int = 7):
         user = await bot.fetch_user(uid)
         result_lines.append(f"**#{rank}** {user.display_name} - 💬 `{msg}` | ❤️ `{react}` | ⭐ Tổng: `{total}`")
 
-    await interaction.followup.send("\n".join(result_lines[:10]))  # top 10
+    await interaction.followup.send("\n".join(result_lines[:10]))
 
 @tasks.loop(minutes=1)
 async def weekly_report():
     now = datetime.now()
-    if now.weekday() == 5 and now.hour == 10 and now.minute == 0:  # 10h sáng thứ 7 GMT+7
+    if now.weekday() == 5 and now.hour == 10 and now.minute == 0:
         for guild in bot.guilds:
             for channel in guild.text_channels:
-                try:
-                    perms = channel.permissions_for(guild.me)
-                    if perms.send_messages:
-                        class FakeInteraction:
-                            async def response(self): pass
-                            async def followup(self): pass
-                        await report_command.callback(FakeInteraction(), 7)
-                        break
-                except:
-                    continue
+                if channel.permissions_for(guild.me).send_messages:
+                    fake = type('FakeInteraction', (), {"response": None, "followup": channel.send})
+                    await report_command.callback(fake(), 7)
+                    break
 
 bot.run(TOKEN)
